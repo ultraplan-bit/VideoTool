@@ -77,13 +77,59 @@ jobs:
           Write-Output "ZIP_NAME=$name" >> $env:GITHUB_ENV
           Write-Output "标签：$tag　压缩包：$name"
 
-      # 7z 比 Compress-Archive 快得多，400MB 级别的目录差别明显。
-      # -mx1：ffmpeg 的 exe 本身是编译产物压不动多少，低压缩级别更快。
+      # 压缩。优先用 7z：-mx1 比 Compress-Archive 快得多，400MB 级别差别明显
+      # （ffmpeg 的 exe 本身是编译产物，压不动多少，低压缩级别更快）。
+      # 找不到 7z 就回退到 Compress-Archive，避免因为工具路径变化导致构建失败。
       - name: 压缩
         shell: pwsh
         run: |
-          & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 $env:ZIP_NAME ./dist/VideoTool/*
+          $sevenZip = @(
+            "C:\Program Files\7-Zip\7z.exe",
+            "C:\Program Files (x86)\7-Zip\7z.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if ($sevenZip) {
+            Write-Output "使用 7z：$sevenZip"
+            # 直接传目录（不用通配符），由 7z 自己递归，
+            # 避免 pwsh 把通配符展开成一长串参数
+            & $sevenZip a -tzip -mx1 $env:ZIP_NAME .\dist\VideoTool
+          } else {
+            Write-Output "未找到 7z，回退到 Compress-Archive"
+            Compress-Archive -Path .\dist\VideoTool -DestinationPath $env:ZIP_NAME
+          }
+
+          if (-not (Test-Path $env:ZIP_NAME)) { throw "压缩包没生成" }
           Write-Output ("压缩包：{0:N0} MB" -f (Get-Item $env:ZIP_NAME).Length / 1MB)
+
+      # 校验压缩包内容。压错目录、通配符被展开成怪路径之类的问题，
+      # 在这里拦下来比发出去一个空包或坏包好。
+      - name: 校验压缩包内容
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead(
+            (Resolve-Path $env:ZIP_NAME).Path)
+          try {
+            # 统一成正斜杠再匹配：不同压缩工具写 zip 时的分隔符可能不一致
+            # （实测 7z 写出来是 VideoTool\VideoTool.exe 这种反斜杠）。
+            # 用 .Replace() 而不是 -replace：前者是字面替换、不涉正则，
+            # 不用担心反斜杠在多层转义里被吃掉。
+            $names = $zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') }
+            Write-Output ("包内文件数：{0}" -f $names.Count)
+            if ($names.Count -lt 100) { throw "包内文件太少（$($names.Count) 个），可能压错了目录" }
+
+            foreach ($need in @("VideoTool.exe",
+                                "_internal/ffmpeg/bin/ffmpeg.exe",
+                                "_internal/ffmpeg/bin/ffprobe.exe",
+                                "_internal/ffmpeg/LICENSE.txt",
+                                "_internal/PySide6")) {
+              $hit = $names | Where-Object { $_ -like "*$need*" } | Select-Object -First 1
+              if (-not $hit) { throw "压缩包里缺少：$need" }
+              Write-Output "  有 $need"
+            }
+          } finally {
+            $zip.Dispose()
+          }
 
       - name: 生成校验和
         shell: pwsh
