@@ -40,7 +40,25 @@
 
 MP4 / WebM 支持三档画质（高质量 / 标准 / 小体积）。
 
-## 运行
+## 下载使用
+
+不想装环境的话，直接下打包好的程序：
+
+**[下载最新版](https://github.com/ultraplan-bit/VideoTool/releases/latest)**
+
+解压后双击 `VideoTool.exe` 即可，**无需安装 Python 或 ffmpeg**，两者都已内置。
+仅支持 Windows 64 位。
+
+每个版本附带 `.sha256` 校验文件，可用它核对下载是否完整：
+
+```powershell
+(Get-FileHash VideoTool_v1.0.0_win64.zip -Algorithm SHA256).Hash
+```
+
+安装包由 GitHub Actions 在 windows-latest 上构建，见
+[Actions 页面](https://github.com/ultraplan-bit/VideoTool/actions)。
+
+## 从源码运行
 
 需要 [uv](https://docs.astral.sh/uv/) 和 Python 3.10+（开发时用的是 3.14.7）。
 
