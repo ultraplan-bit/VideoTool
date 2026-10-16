@@ -105,7 +105,11 @@ jobs:
           }
 
           if (-not (Test-Path $env:ZIP_NAME)) { throw "压缩包没生成" }
-          Write-Output ("压缩包：{0:N0} MB" -f (Get-Item $env:ZIP_NAME).Length / 1MB)
+          # 先算好大小再格式化：PowerShell 里 -f 的优先级高于 /，
+          # 写成 `"...{0:N0} MB" -f $len / 1MB` 会先格式化成字符串再去除以 1MB，
+          # 直接报 "Cannot convert value ... to type System.Int32"（实测踩过）。
+          $mb = (Get-Item $env:ZIP_NAME).Length / 1MB
+          Write-Output ("压缩包：{0:N0} MB" -f $mb)
 
       # 校验压缩包内容。压错目录、通配符被展开成怪路径之类的问题，
       # 在这里拦下来比发出去一个空包或坏包好。
