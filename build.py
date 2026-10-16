@@ -17,6 +17,17 @@ ROOT = Path(__file__).resolve().parent
 APP_NAME = "VideoTool"
 FFMPEG_BIN = ROOT / "vendor" / "ffmpeg" / "bin"
 
+# 输出里有中文，而 Windows 上 stdout 的默认编码可能是 cp1252（英文环境），
+# 遇到中文会直接抛 UnicodeEncodeError。CI 里已用 PYTHONIOENCODING=utf-8 兜底，
+# 这里再防一层，保证脚本单独跑也不挑环境。
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure and (getattr(_stream, "encoding", "") or "").lower() not in ("utf-8", "utf8"):
+        try:
+            _reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
 # 没用到但会被 hook 顺带收进来的大块头，明确排掉以缩小体积
 EXCLUDES = [
     "PySide6.QtNetwork", "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets",
@@ -54,12 +65,19 @@ def main() -> int:
         print("（程序运行时 Windows 会锁住 dist 里的文件，无法覆盖。）")
         return 3
 
+    # 清理上一次的产物。必须先判断存在：CI 是全新检出，build/ 和 dist/
+    # 都不存在，直接 rmtree 会抛 FileNotFoundError（实测踩过）。
     for stale in (ROOT / "build", ROOT / "dist"):
+        if not stale.exists():
+            continue
         try:
             shutil.rmtree(stale, ignore_errors=False)
         except PermissionError as exc:
             print(f"无法清理 {stale}：{exc}")
             print("可能有程序正在占用这些文件，请关闭后重试。")
+            return 3
+        except OSError as exc:
+            print(f"清理 {stale} 失败：{exc}")
             return 3
 
     args = [
