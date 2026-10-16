@@ -20,6 +20,12 @@ jobs:
   build:
     runs-on: windows-latest
 
+    # runner 是英文环境，Python 的 stdout 默认用 cp1252，
+    # 脚本里 print 中文会直接 UnicodeEncodeError 崩掉（实测踩过）。
+    # 这里统一成 utf-8，覆盖所有步骤。
+    env:
+      PYTHONIOENCODING: utf-8
+
     steps:
       - uses: actions/checkout@v4
         with:
