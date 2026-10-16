@@ -1,0 +1,157 @@
+name: Release
+
+# 推送 v*.*.* 标签时自动构建并发 Release。
+# 也支持手动触发（Actions 页面点 Run workflow），便于重跑或补发。
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要构建的标签（留空则用当前分支）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 手动触发且填了标签时，检出那个标签而不是当前分支
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          # 仓库不带 .python-version（在 .gitignore 里），这里显式指定
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync
+
+      # ffmpeg 二进制体积太大（两个 exe 共 338MB），没有进仓库，构建时下载。
+      # 用 BtbN 的 GPL 构建：含 libx264/libx265，转 H.264 必需。
+      - name: 下载内置 ffmpeg
+        run: uv run python scripts/fetch_ffmpeg.py
+
+      - name: 打包
+        run: uv run python build.py
+
+      - name: 校验产物
+        shell: pwsh
+        run: |
+          $exe = "dist/VideoTool/VideoTool.exe"
+          if (-not (Test-Path $exe)) { throw "打包产物缺失：$exe" }
+          $ffmpeg = "dist/VideoTool/_internal/ffmpeg/bin/ffmpeg.exe"
+          if (-not (Test-Path $ffmpeg)) { throw "ffmpeg 未打进包：$ffmpeg" }
+          $license = "dist/VideoTool/_internal/ffmpeg/LICENSE.txt"
+          if (-not (Test-Path $license)) { throw "缺少 ffmpeg 许可证文件：$license" }
+          $size = (Get-ChildItem dist/VideoTool -Recurse -File |
+                   Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Output ("产物大小：{0:N0} MB" -f $size)
+
+      - name: 解析标签
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          # 手动触发必须给标签：不给的话 ref_name 会是分支名（如 main），
+          # 会把 release 打到一个叫 main 的标签上，很难看也不好收拾。
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and
+              "${{ github.event.inputs.tag }}" -eq "") {
+            throw "手动触发时必须填写 tag 输入（例如 v1.0.0）"
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+') {
+            throw "标签格式不对：$tag（应形如 v1.0.0）"
+          }
+          $name = "VideoTool_${tag}_win64.zip"
+          Write-Output "TAG=$tag" >> $env:GITHUB_ENV
+          Write-Output "ZIP_NAME=$name" >> $env:GITHUB_ENV
+          Write-Output "标签：$tag　压缩包：$name"
+
+      # 7z 比 Compress-Archive 快得多，400MB 级别的目录差别明显。
+      # -mx1：ffmpeg 的 exe 本身是编译产物压不动多少，低压缩级别更快。
+      - name: 压缩
+        shell: pwsh
+        run: |
+          & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 $env:ZIP_NAME ./dist/VideoTool/*
+          Write-Output ("压缩包：{0:N0} MB" -f (Get-Item $env:ZIP_NAME).Length / 1MB)
+
+      - name: 生成校验和
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash $env:ZIP_NAME -Algorithm SHA256).Hash
+          "$hash  $env:ZIP_NAME" | Out-File -Encoding utf8 "$env:ZIP_NAME.sha256"
+          Write-Output "SHA256: $hash"
+
+      - name: 上传构建产物（备用，保留 30 天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoTool-win64
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 30
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: VideoTool ${{ env.TAG }}
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+          body: |
+            视频格式转换器（Windows 64 位，免安装）。
+
+            ## 使用
+
+            下载下方 `VideoTool_*_win64.zip`，解压后双击 `VideoTool.exe` 即可。
+            **无需安装 Python 或 ffmpeg**，两者都已内置。
+
+            ## 功能
+
+            - **媒体信息**：分辨率、时长、码率、编码格式、帧率、音轨、流统计，附缩略图
+            - **6 种转换预设**：MP4（H.264+AAC）、MKV 换壳、WebM（VP9+Opus）、GIF、MP3、M4A
+            - **批量队列**：一次加多个文件，可混用不同预设，每项独立进度
+            - **硬件加速**：自动探测 NVENC / Quick Sync / AMF，实测约 2 倍加速
+            - **深色 / 浅色主题**：一键切换
+            - **可取消**：失败或取消时自动清理半成品文件
+
+            ## 技术选型
+
+            | 层 | 选择 |
+            |---|---|
+            | 界面 | Python + PySide6（Qt Widgets），真原生窗口 |
+            | 转换 | ffmpeg 命令行，随程序内置 |
+            | 打包 | PyInstaller onedir |
+
+            选 PySide6 是因为要的是桌面客户端，不是套壳网页。
+            ffmpeg 用 GPL 构建（含 libx264/libx265），只通过命令行调用、不链接其库。
+
+            ## 测试
+
+            171 项测试，全部真调 ffmpeg 跑完整流程：转换链路、界面交互、
+            主题对比度、硬件编码、交互边界、打包产物。
+
+            ```
+            uv run python tests/test_e2e.py          # 转换链路
+            uv run python tests/test_gui.py          # 界面交互
+            uv run python tests/test_interaction.py  # 交互边界
+            uv run python tests/test_hardware.py     # 硬件编码
+            uv run python tests/test_theme.py        # 主题对比度
+            uv run python tests/test_package.py      # 打包产物
+            ```
+
+            本包由 GitHub Actions 在 windows-latest 上构建。
+          files: |
+            VideoTool_*_win64.zip
+            VideoTool_*_win64.zip.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
